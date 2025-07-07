@@ -1,0 +1,273 @@
+# wueb_chatbot_ui.py
+# Requirements:
+#   pip install openai customtkinter requests pillow rapidfuzz
+
+import os
+import json
+import requests
+import threading
+import customtkinter as ctk
+import openai
+import webbrowser
+from rapidfuzz import process, fuzz
+from dotenv import load_dotenv
+load_dotenv()
+
+# ========== Configuration ==========
+import os
+openai.api_key = os.getenv("OPENAI_API_KEY")
+if not openai.api_key:
+    raise ValueError("Missing OPENAI_API_KEY environment variable")
+
+# ========== Load Data Files ==========
+with open("buildings.json", encoding="utf-8") as f:
+    BUILDINGS_DATA = json.load(f)
+with open("navigation.json", encoding="utf-8") as f:
+    NAV_DATA = json.load(f)
+with open("university_info.json", encoding="utf-8") as f:
+    UNIVERSITY_INFO = json.load(f)
+
+# Build alias lookup for buildings
+BUILDINGS = {}
+def register_building(rec):
+    key = rec["name"].lower()
+    BUILDINGS[key] = rec
+    for alias in rec.get("aliases", []):
+        BUILDINGS[alias.lower()] = rec
+
+for rec in BUILDINGS_DATA:
+    register_building(rec)
+# also register simple name (text before "(")
+for rec in BUILDINGS_DATA:
+    simple = rec["name"].split("(")[0].strip().lower()
+    BUILDINGS[simple] = rec
+
+# ========== Determine User Location ==========
+def get_user_location():
+    try:
+        resp = requests.get("https://ip-api.com/json/", timeout=5).json()
+        lat, lon = resp.get("lat"), resp.get("lon")
+        if lat is not None and lon is not None:
+            return f"{lat},{lon}"
+    except:
+        pass
+    # fallback to campus center
+    return "51.107883,17.038538"
+
+USER_ORIGIN = get_user_location()
+
+# ========== Chat History ==========
+chat_history = [
+    {"role": "system", "content":
+     "You are WUEB-Bot, an expert assistant on Wrocław University of Economics and Business."}
+]
+
+# ========== GPT Helper ==========
+def ask_gpt(prompt: str) -> str:
+    """Append user prompt to history, call GPT, return reply."""
+    chat_history.append({"role": "user", "content": prompt})
+    resp = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=chat_history,
+        temperature=0.7
+    )
+    reply = resp.choices[0].message.content.strip()
+    chat_history.append({"role": "assistant", "content": reply})
+    return reply
+
+# ========== UI Setup ==========
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+FONT = ("Segoe UI", 16)
+SM_FONT = ("Segoe UI", 14)
+
+class WUEBChatbotUI(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("WUEB Chatbot")
+        self.geometry("700x600")
+        # session state
+        self.mode = None       # None | 'general' | 'nav' | 'info'
+        self.nav_shown = False
+        self.info_topics = []
+        self._build()
+
+    def _build(self):
+        # Chat display
+        self.chat_log = ctk.CTkTextbox(self, wrap="word", state="disabled", font=FONT)
+        self.chat_log.pack(fill="both", expand=True, padx=10, pady=(10,0))
+
+        # Input + buttons
+        frame = ctk.CTkFrame(self)
+        frame.pack(fill="x", padx=10, pady=10)
+        self.entry = ctk.CTkEntry(frame, placeholder_text="Enter choice or message...", font=FONT)
+        self.entry.pack(side="left", fill="x", expand=True, padx=(0,10))
+        self.entry.bind("<Return>", lambda e: self._on_send())
+
+        self.send_btn = ctk.CTkButton(frame, text="Send", font=SM_FONT, command=self._on_send)
+        self.send_btn.pack(side="right", padx=(0,5))
+        ctk.CTkButton(frame, text="Clear Chat", font=SM_FONT, fg_color="transparent",
+                      command=self._on_clear).pack(side="right", padx=(0,5))
+
+        theme_menu = ctk.CTkOptionMenu(frame, values=["Dark","Light"],
+                                       command=self._change_theme, font=SM_FONT)
+        theme_menu.set(ctk.get_appearance_mode().capitalize())
+        theme_menu.pack(side="right", padx=(0,5))
+
+        # Main menu prompt
+        self._append_bot(
+            "Welcome! Please choose an option: (type 'end' to end the session)\n"
+            "1) General Questions\n"
+            "2) Navigation (building directions)\n"
+            "3) University Info"
+        )
+
+    def _change_theme(self, choice):
+        ctk.set_appearance_mode(choice.lower())
+
+    def _append(self, sender: str, text: str):
+        self.chat_log.configure(state="normal")
+        self.chat_log.insert("end", f"{sender}: {text}\n\n")
+        self.chat_log.configure(state="disabled")
+        self.chat_log.see("end")
+
+    def _append_user(self, text: str):
+        self._append("You", text)
+
+    def _append_bot(self, text: str):
+        self._append("Bot", text)
+
+    def _on_send(self):
+        txt = self.entry.get().strip()
+        if not txt:
+            return
+        self._append_user(txt)
+        self.entry.delete(0, "end")
+        self.send_btn.configure(state="disabled")
+        threading.Thread(target=self._process, args=(txt,), daemon=True).start()
+
+    def _process(self, txt: str):
+        low = txt.lower().strip()
+
+        # 0) end → reset
+        if low == "end":
+            self.mode = None
+            self.nav_shown = False
+            self._append_bot(
+                "Session ended. Please choose an option:\n"
+                "1) General Questions\n"
+                "2) Navigation (building directions)\n"
+                "3) University Info"
+            )
+            self.send_btn.configure(state="normal")
+            return
+
+        # 1) if no mode selected yet → choose mode
+        if self.mode is None:
+            if low in ("1","general"):
+                self.mode = "general"
+                self._append_bot("General mode: Ask me anything! (type 'end' to go back)")
+            elif low in ("2","navigation","nav"):
+                self.mode = "nav"
+                # show numbered building list
+                lines = [ f"{i+1}) {b['name']}" for i,b in enumerate(BUILDINGS_DATA) ]
+                self._append_bot(
+                    "Navigation mode: choose a building by number or name (type 'end' to cancel):\n"
+                    + "\n".join(lines)
+                )
+                self.nav_shown = True
+            elif low in ("3","info","university info"):
+                self.mode = "info"
+                # show topics
+                self.info_topics = list(UNIVERSITY_INFO.keys())
+                lines = [ f"{i+1}) {topic.replace('_',' ').capitalize()}"
+                          for i,topic in enumerate(self.info_topics) ]
+                self._append_bot(
+                    "University Info mode: choose a topic by number or ask freely (type 'end' to cancel):\n"
+                    + "\n".join(lines)
+                )
+            else:
+                self._append_bot("Please choose 1, 2 or 3.")
+            self.send_btn.configure(state="normal")
+            return
+
+        # 2) mode-specific handling
+        if self.mode == "general":
+            reply = ask_gpt(txt)
+            self._append_bot(reply)
+
+        elif self.mode == "nav":
+            b = None
+            # if they picked a number
+            if self.nav_shown and txt.isdigit():
+                idx = int(txt) - 1
+                if 0 <= idx < len(BUILDINGS_DATA):
+                    b = BUILDINGS_DATA[idx]
+            # else fuzzy-match name
+            if not b:
+                match, score, _ = process.extractOne(low, BUILDINGS.keys(), scorer=fuzz.token_sort_ratio)
+                if score >= 75:
+                    b = BUILDINGS[match]
+            if b:
+                link = f"https://www.google.com/maps/dir/{USER_ORIGIN}/{b['lat']},{b['lng']}"
+                self._append_bot(f"Directions to {b['name']}: {link}")
+                webbrowser.open(link)
+            else:
+                self._append_bot("Sorry, I couldn't recognize that building.")
+            # reset
+            self.mode = None
+            self.nav_shown = False
+
+        elif self.mode == "info":
+            topic = None
+            # number selection
+            if txt.isdigit():
+                idx = int(txt) - 1
+                if 0 <= idx < len(self.info_topics):
+                    topic = self.info_topics[idx]
+            # fuzzy topic match
+            if not topic:
+                match, score, _ = process.extractOne(low, UNIVERSITY_INFO.keys(), scorer=fuzz.token_sort_ratio)
+                if score >= 75:
+                    topic = match
+            if topic:
+                data = UNIVERSITY_INFO[topic]
+                prompt = (
+                    f"Please give me a concise, user-friendly summary of the following "
+                    f"{topic.replace('_',' ')} information:\n\n{json.dumps(data, ensure_ascii=False)}"
+                )
+                reply = ask_gpt(prompt)
+                self._append_bot(reply)
+            else:
+                # fallback free-form Q&A with context
+                facts = json.dumps(UNIVERSITY_INFO, ensure_ascii=False)
+                prompt = f"{txt}\n\nHere is the university data you can reference:\n{facts}"
+                reply = ask_gpt(prompt)
+                self._append_bot(reply)
+            # reset
+            self.mode = None
+
+        # re-enable send button
+        self.send_btn.configure(state="normal")
+
+    def _on_clear(self):
+        # clear chat history on screen only
+        self.chat_log.configure(state="normal")
+        self.chat_log.delete("1.0", "end")
+        self.chat_log.configure(state="disabled")
+        # clear conversation history
+        chat_history[:] = chat_history[:1]
+        # reset session
+        self.mode = None
+        self.nav_shown = False
+        self._append_bot(
+            "Chat cleared. Please choose an option:\n"
+            "1) General Questions\n"
+            "2) Navigation (building directions)\n"
+            "3) University Info"
+        )
+
+if __name__ == "__main__":
+    app = WUEBChatbotUI()
+    app.mainloop()
+    
