@@ -1,2 +1,16 @@
-# web-chatbot
- WUEB Chatbot UI is an AI-powered desktop assistant built for students and visitors of Wrocław University of Economics and Business (WUEB). It provides quick access to university-related information, navigation help around campus, and general Q&amp;A — all via a modern graphical interface powered by OpenAI GPT-4.
+WUEB Chatbot is a modern desktop assistant built for students and visitors of **Wrocław University of Economics and Business (WUEB)**.
+
+It helps users:
+- Ask questions about university policies and departments
+- Get directions to campus buildings
+- Chat with an AI assistant using GPT-4
+
+---
+
+💻 Features
+
+GPT-4 powered intelligent answers  
+University info from custom data files  
+Google Maps directions to buildings  
+Smart matching using spaCy & RapidFuzz  
+Beautiful desktop UI with `customtkinter`
