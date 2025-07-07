@@ -1,0 +1,9 @@
+openai
+customtkinter
+requests
+pillow
+rapidfuzz
+spacy
+langchain
+langchain_community
+python-dotenv
